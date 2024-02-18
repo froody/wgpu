@@ -36,3 +36,36 @@ fn collatz_iterations(n_base: u32) -> u32{
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     v_indices[global_id.x] = collatz_iterations(v_indices[global_id.x]);
 }
+
+struct Vertex20 {
+    values: vec3<u32>,
+    padding: f32,
+    padding2: u32,
+};
+
+struct Vertex32 {
+    values: vec3<u32>,
+    padding: f32,
+    padding2: u32,
+    padding3: u32,
+    padding4: u32,
+    padding5: u32,
+};
+
+@group(1) @binding(0) var<storage, read_write> v20_indices: array<u32>; // this is used as both input and output for convenience
+@group(1) @binding(1) var<storage> v20: array<Vertex20>;
+
+@compute
+@workgroup_size(1)
+fn main_20(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    v20_indices[global_id.x] = v20[global_id.x].values.x;
+}
+
+@group(2) @binding(0) var<storage, read_write> v32_indices: array<u32>; // this is used as both input and output for convenience
+@group(2) @binding(1) var<storage> v32: array<Vertex32>;
+
+@compute
+@workgroup_size(1)
+fn main_32(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    v32_indices[global_id.x] = v32[global_id.x].values.x;
+}

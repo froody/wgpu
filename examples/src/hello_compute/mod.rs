@@ -4,18 +4,28 @@ use wgpu::util::DeviceExt;
 // Indicates a u32 overflow in an intermediate Collatz value
 const OVERFLOW: u32 = 0xffffffff;
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex20 {
+    nums: [u32; 3],
+    padding1: f32,
+    padding2: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex32 {
+    nums: [u32; 3],
+    padding1: f32,
+    padding2: u32,
+    padding3: u32,
+    padding4: u32,
+    padding5: u32,
+}
+
 #[cfg_attr(test, allow(dead_code))]
 async fn run() {
-    let numbers = if std::env::args().len() <= 2 {
-        let default = vec![1, 2, 3, 4];
-        println!("No numbers were provided, defaulting to {default:?}");
-        default
-    } else {
-        std::env::args()
-            .skip(2)
-            .map(|s| u32::from_str(&s).expect("You must pass a list of positive integers!"))
-            .collect()
-    };
+    let numbers = (0..20).collect::<Vec<_>>();
 
     let steps = execute_gpu(&numbers).await.unwrap();
 
@@ -27,7 +37,7 @@ async fn run() {
         })
         .collect();
 
-    println!("Steps: [{}]", disp_steps.join(", "));
+    //println!("Steps: [{}]", disp_steps.join(", "));
     #[cfg(target_arch = "wasm32")]
     log::info!("Steps: [{}]", disp_steps.join(", "));
 }
@@ -97,6 +107,37 @@ async fn execute_gpu_inner(
             | wgpu::BufferUsages::COPY_SRC,
     });
 
+    let vert_20s = (0..numbers.len() as u32)
+        .map(|i| Vertex20 {
+            nums: [i, 0, 0],
+            padding1: 0.0,
+            padding2: 0,
+        })
+        .collect::<Vec<_>>();
+
+    let vert_32s = (0..numbers.len() as u32)
+        .map(|i| Vertex32 {
+            nums: [i, 0, 0],
+            padding1: 0.0,
+            padding2: 0,
+            padding3: 0,
+            padding4: 0,
+            padding5: 0,
+        })
+        .collect::<Vec<_>>();
+
+    let vert_20_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Vertex Buffer 20"),
+        contents: bytemuck::cast_slice(&vert_20s),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    let vert_32_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Vertex Buffer 32"),
+        contents: bytemuck::cast_slice(&vert_32s),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
     // A bind group defines how buffers are accessed by shaders.
     // It is to WebGPU what a descriptor set is to Vulkan.
     // `binding` here refers to the `binding` of a buffer in the shader (`layout(set = 0, binding = 0) buffer`).
@@ -111,38 +152,161 @@ async fn execute_gpu_inner(
         entry_point: "main",
     });
 
-    // Instantiates the bind group, once again specifying the binding of buffers.
-    let bind_group_layout = compute_pipeline.get_bind_group_layout(0);
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    // Instantiates the pipeline.
+    let compute_pipeline_20 = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
-        layout: &bind_group_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: storage_buffer.as_entire_binding(),
-        }],
+        layout: None,
+        module: &cs_module,
+        entry_point: "main_20",
     });
 
-    // A command encoder executes one or many pipelines.
-    // It is to WebGPU what a command buffer is to Vulkan.
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let compute_pipeline_32 = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: None,
+        module: &cs_module,
+        entry_point: "main_32",
+    });
+
     {
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        // Instantiates the bind group, once again specifying the binding of buffers.
+        let bind_group_layout = compute_pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
-            timestamp_writes: None,
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: storage_buffer.as_entire_binding(),
+            }],
         });
-        cpass.set_pipeline(&compute_pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.insert_debug_marker("compute collatz iterations");
-        cpass.dispatch_workgroups(numbers.len() as u32, 1, 1); // Number of cells to run, the (x,y,z) size of item being processed
+
+        // A command encoder executes one or many pipelines.
+        // It is to WebGPU what a command buffer is to Vulkan.
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&compute_pipeline);
+            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.insert_debug_marker("compute collatz iterations");
+            cpass.dispatch_workgroups(numbers.len() as u32, 1, 1); // Number of cells to run, the (x,y,z) size of item being processed
+        }
+        // Sets adds copy operation to command encoder.
+        // Will copy data from storage buffer on GPU to staging buffer on CPU.
+        encoder.copy_buffer_to_buffer(&storage_buffer, 0, &staging_buffer, 0, size);
+
+        // Submits command encoder for processing
+        queue.submit(Some(encoder.finish()));
     }
-    // Sets adds copy operation to command encoder.
-    // Will copy data from storage buffer on GPU to staging buffer on CPU.
-    encoder.copy_buffer_to_buffer(&storage_buffer, 0, &staging_buffer, 0, size);
 
-    // Submits command encoder for processing
-    queue.submit(Some(encoder.finish()));
+    let res = read_staging_buffer(device, &staging_buffer).await;
+    println!("result: {:?}", res.iter().sum::<u32>());
 
+    {
+        // Instantiates the bind group, once again specifying the binding of buffers.
+        let empty_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &compute_pipeline_20.get_bind_group_layout(0),
+            entries: &[],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &compute_pipeline_20.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry {
+                binding: 0,
+                resource: storage_buffer.as_entire_binding(),
+            },
+                wgpu::BindGroupEntry {
+                binding: 1,
+                resource: vert_20_buffer.as_entire_binding(),
+            },
+            ],
+        });
+
+        // A command encoder executes one or many pipelines.
+        // It is to WebGPU what a command buffer is to Vulkan.
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&compute_pipeline_20);
+            cpass.set_bind_group(0, &empty_bind_group, &[]);
+            cpass.set_bind_group(1, &bind_group, &[]);
+            cpass.insert_debug_marker("compute collatz iterations");
+            cpass.dispatch_workgroups(numbers.len() as u32, 1, 1); // Number of cells to run, the (x,y,z) size of item being processed
+        }
+        // Sets adds copy operation to command encoder.
+        // Will copy data from storage buffer on GPU to staging buffer on CPU.
+        encoder.copy_buffer_to_buffer(&storage_buffer, 0, &staging_buffer, 0, size);
+
+        // Submits command encoder for processing
+        queue.submit(Some(encoder.finish()));
+        let res = read_staging_buffer(device, &staging_buffer).await;
+        println!("result with vertex 20: {:?}", res);
+    }
+    {
+        // Instantiates the bind group, once again specifying the binding of buffers.
+        let empty_bind_group0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &compute_pipeline_32.get_bind_group_layout(0),
+            entries: &[],
+        });
+        let empty_bind_group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &compute_pipeline_32.get_bind_group_layout(1),
+            entries: &[],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &compute_pipeline_32.get_bind_group_layout(2),
+            entries: &[
+                wgpu::BindGroupEntry {
+                binding: 0,
+                resource: storage_buffer.as_entire_binding(),
+            },
+                wgpu::BindGroupEntry {
+                binding: 1,
+                resource: vert_32_buffer.as_entire_binding(),
+            },
+            ],
+        });
+
+        // A command encoder executes one or many pipelines.
+        // It is to WebGPU what a command buffer is to Vulkan.
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&compute_pipeline_32);
+            cpass.set_bind_group(0, &empty_bind_group0, &[]);
+            cpass.set_bind_group(1, &empty_bind_group1, &[]);
+            cpass.set_bind_group(2, &bind_group, &[]);
+            cpass.insert_debug_marker("compute collatz iterations");
+            cpass.dispatch_workgroups(numbers.len() as u32, 1, 1); // Number of cells to run, the (x,y,z) size of item being processed
+        }
+        // Sets adds copy operation to command encoder.
+        // Will copy data from storage buffer on GPU to staging buffer on CPU.
+        encoder.copy_buffer_to_buffer(&storage_buffer, 0, &staging_buffer, 0, size);
+
+        // Submits command encoder for processing
+        queue.submit(Some(encoder.finish()));
+        let res = read_staging_buffer(device, &staging_buffer).await;
+        println!("result with vertex 32: {:?}", res);
+    }
+
+    Some(res)
+}
+
+async fn read_staging_buffer(device: &wgpu::Device, staging_buffer: &wgpu::Buffer) -> Vec<u32> {
     // Note that we're not calling `.await` here.
     let buffer_slice = staging_buffer.slice(..);
     // Sets the buffer up for mapping, sending over the result of the mapping back to us when it is finished.
@@ -171,7 +335,7 @@ async fn execute_gpu_inner(
                                 // It effectively frees the memory
 
         // Returns data from buffer
-        Some(result)
+        result
     } else {
         panic!("failed to run compute on gpu!")
     }
